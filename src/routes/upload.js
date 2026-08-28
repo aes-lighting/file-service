@@ -1,6 +1,8 @@
 const express = require('express');
 const multer = require('multer');
 const axios = require('axios');
+const FormData = require('form-data');
+const { Readable } = require('stream');
 const config = require('../config');
 
 const router = express.Router();
@@ -22,10 +24,10 @@ router.post('/', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No file provided' });
     }
 
-    // Prepare form data for file service
+    // Prepare form data for file service using form-data package
     const formData = new FormData();
-    const blob = new Blob([req.file.buffer], { type: req.file.mimetype });
-    formData.append('file', blob, req.file.originalname);
+    const stream = Readable.from(req.file.buffer);
+    formData.append('file', stream, req.file.originalname);
     formData.append('filename', filename);
 
     if (metadata) {
