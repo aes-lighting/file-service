@@ -1,35 +1,256 @@
-require('dotenv').config();
 const express = require('express');
-const path = require('path');
-const config = require('./config');
-const uploadRoutes = require('./routes/upload');
-const statusRoutes = require('./routes/status');
+const multer = require('multer');
+const axios = require('axios');
+const FormData = require('form-data');
 
 const app = express();
+
+// Configuration from environment
+const API_KEY = process.env.API_KEY || 'test-api-key-12345';
+const FILE_SERVICE_HOST = process.env.FILE_SERVICE_HOST || '127.0.0.1';
+const FILE_SERVICE_PORT = process.env.FILE_SERVICE_PORT || 3001;
+const FILE_SERVICE_API_KEY = process.env.FILE_SERVICE_API_KEY || 'test-api-key-12345';
+const ENABLE_HEALTH = process.env.ENABLE_HEALTH_ENDPOINT !== 'false';
+const ENABLE_STATUS = process.env.ENABLE_STATUS_ENDPOINT !== 'false';
+const ENABLE_LIST = process.env.ENABLE_PROJECTS_LIST_ENDPOINT !== 'false';
+const ENABLE_LOOKUP = process.env.ENABLE_PROJECT_LOOKUP_ENDPOINT !== 'false';
+const ENABLE_UPLOAD = process.env.ENABLE_UPLOAD_ENDPOINT !== 'false';
+const CORS_ENABLED = process.env.CORS_ENABLED === 'true';
+const CORS_ORIGINS = process.env.CORS_ALLOWED_ORIGINS || 'localhost:3000,localhost:3001';
+
+const BACKEND_URL = `http://${FILE_SERVICE_HOST}:${FILE_SERVICE_PORT}`;
+
+// Multer configuration for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024 // 50MB max file size
+  },
+  fileFilter: (req, file, cb) => {
+    // Validate file type - allow image files only
+    const allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/bmp', 'image/webp'];
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Invalid file type: ${file.mimetype}. Allowed: ${allowedMimes.join(', ')}`));
+    }
+  }
+});
 
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, '../public')));
 
-// Routes
-app.use('/api/upload', uploadRoutes);
-app.use('/api/status', statusRoutes);
-
-// Home page
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/index.html'));
-});
-
-// Health check
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'AES File Service Relay',
-    timestamp: new Date().toISOString(),
-    fileServiceUrl: config.getFileServiceUrl()
+// CORS middleware (if enabled)
+if (CORS_ENABLED) {
+  const allowedOrigins = CORS_ORIGINS.split(',').map(o => o.trim());
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (allowedOrigins.includes(origin)) {
+      res.header('Access-Control-Allow-Origin', origin);
+      res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.header('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
+    }
+    next();
   });
-});
+}
+
+// API Key validation middleware for /api/* endpoints
+const validateApiKey = (req, res, next) => {
+  const apiKey = req.headers['x-api-key'] || req.query.apiKey;
+  if (apiKey !== API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized - Invalid API key' });
+  }
+  next();
+};
+
+// Health check endpoint (no auth required)
+if (ENABLE_HEALTH) {
+  app.get('/health', (req, res) => {
+    res.json({
+      status: 'ok',
+      service: 'AES File Service Relay',
+      timestamp: new Date().toISOString(),
+      fileServiceUrl: BACKEND_URL
+    });
+  });
+}
+
+// Status endpoint - forwards to backend
+if (ENABLE_STATUS) {
+  app.get('/api/status', validateApiKey, async (req, res) => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/api/status`, {
+        headers: {
+          'X-API-Key': FILE_SERVICE_API_KEY
+        },
+        timeout: 30000
+      });
+      res.json(response.data);
+    } catch (err) {
+      console.error('Status endpoint error:', err.message);
+      res.status(err.response?.status || 500).json({
+        error: 'Failed to get status',
+        details: err.message
+      });
+    }
+  });
+}
+
+// Get all projects endpoint - forwards to backend
+if (ENABLE_LIST) {
+  app.get('/api/projects', validateApiKey, async (req, res) => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/api/projects`, {
+        headers: {
+          'X-API-Key': FILE_SERVICE_API_KEY
+        },
+        timeout: 30000
+      });
+      res.json(response.data);
+    } catch (err) {
+      console.error('Projects list error:', err.message);
+      res.status(err.response?.status || 500).json({
+        error: 'Failed to get projects',
+        details: err.message
+      });
+    }
+  });
+}
+
+// Get project by job number endpoint - forwards to backend
+if (ENABLE_LOOKUP) {
+  app.get('/api/projects/:jobNumber', validateApiKey, async (req, res) => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/api/projects/${req.params.jobNumber}`, {
+        headers: {
+          'X-API-Key': FILE_SERVICE_API_KEY
+        },
+        timeout: 30000
+      });
+      res.json(response.data);
+    } catch (err) {
+      console.error('Project lookup error:', err.message);
+      res.status(err.response?.status || 500).json({
+        error: 'Failed to get project',
+        details: err.message
+      });
+    }
+  });
+}
+
+// Upload endpoints - forwards to backend
+if (ENABLE_UPLOAD) {
+  // Upload packing slip image
+  app.post('/api/upload/packing-slip', validateApiKey, upload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'No file provided'
+        });
+      }
+
+      const { po_number } = req.body;
+
+      // Create FormData for multipart upload
+      const formData = new FormData();
+      formData.append('po_number', po_number);
+      formData.append('file', req.file.buffer, {
+        filename: req.file.originalname,
+        contentType: req.file.mimetype
+      });
+
+      // Forward to backend with FILE_SERVICE_API_KEY
+      const response = await axios.post(
+        `${BACKEND_URL}/api/upload/packing-slip`,
+        formData,
+        {
+          headers: {
+            ...formData.getHeaders(),
+            'X-API-Key': FILE_SERVICE_API_KEY
+          },
+          timeout: 30000
+        }
+      );
+
+      res.json(response.data);
+    } catch (err) {
+      console.error('Packing slip upload error:', err.message);
+
+      if (err.response) {
+        // Backend returned an error
+        res.status(err.response.status).json({
+          success: false,
+          error: err.response.data?.error || 'Upload failed',
+          details: err.response.data?.details || err.message
+        });
+      } else {
+        // Network or other error
+        res.status(500).json({
+          success: false,
+          error: 'Upload failed',
+          details: err.message
+        });
+      }
+    }
+  });
+
+  // Upload intake photo
+  app.post('/api/upload/intake', validateApiKey, upload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'No file provided'
+        });
+      }
+
+      const { po_number } = req.body;
+
+      // Create FormData for multipart upload
+      const formData = new FormData();
+      formData.append('po_number', po_number);
+      formData.append('file', req.file.buffer, {
+        filename: req.file.originalname,
+        contentType: req.file.mimetype
+      });
+
+      // Forward to backend with FILE_SERVICE_API_KEY
+      const response = await axios.post(
+        `${BACKEND_URL}/api/upload/intake`,
+        formData,
+        {
+          headers: {
+            ...formData.getHeaders(),
+            'X-API-Key': FILE_SERVICE_API_KEY
+          },
+          timeout: 30000
+        }
+      );
+
+      res.json(response.data);
+    } catch (err) {
+      console.error('Intake upload error:', err.message);
+
+      if (err.response) {
+        // Backend returned an error
+        res.status(err.response.status).json({
+          success: false,
+          error: err.response.data?.error || 'Upload failed',
+          details: err.response.data?.details || err.message
+        });
+      } else {
+        // Network or other error
+        res.status(500).json({
+          success: false,
+          error: 'Upload failed',
+          details: err.message
+        });
+      }
+    }
+  });
+}
 
 // 404
 app.use((req, res) => {
@@ -42,21 +263,4 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error', details: err.message });
 });
 
-// Start server
-const PORT = config.getPort();
-const HOST = config.getHost();
-
-app.listen(PORT, HOST, () => {
-  console.log(`\n✓ File Service Relay started on http://${HOST}:${PORT}`);
-  console.log(`✓ File Service URL: ${config.getFileServiceUrl()}`);
-  console.log(`✓ API Key configured: ${config.getApiKey() ? 'Yes' : 'No'}`);
-  console.log(`✓ Upload endpoint: POST /api/upload`);
-  console.log(`✓ Status endpoint: GET /api/status`);
-  console.log(`✓ Health check: GET /health`);
-  console.log('\n📁 Ready to relay uploads!\n');
-});
-
-process.on('SIGINT', () => {
-  console.log('\nShutting down...');
-  process.exit(0);
-});
+module.exports = app;
