@@ -118,22 +118,42 @@ if (ENABLE_LIST) {
   });
 }
 
-// Get project by job number endpoint - forwards to backend
+// Get project by project number endpoint - forwards to backend
 if (ENABLE_LOOKUP) {
-  app.get('/api/projects/:jobNumber', validateApiKey, async (req, res) => {
+  app.get('/api/projects/:projectNumber', validateApiKey, async (req, res) => {
     try {
-      const response = await axios.get(`${BACKEND_URL}/api/projects/${req.params.jobNumber}`, {
+      const projectNumber = req.params.projectNumber;
+
+      // Query backend for project information
+      const response = await axios.get(`${BACKEND_URL}/api/projects/${projectNumber}`, {
         headers: {
           'X-API-Key': FILE_SERVICE_API_KEY
         },
         timeout: 30000
       });
-      res.json(response.data);
+
+      // Ensure response has projectName field
+      if (response.data && response.data.projectName) {
+        res.json({
+          projectNumber: projectNumber,
+          projectName: response.data.projectName,
+          ...response.data
+        });
+      } else if (response.data) {
+        // If backend doesn't return projectName but has other data, try to extract it
+        res.json(response.data);
+      } else {
+        res.status(404).json({
+          error: 'Project not found',
+          projectNumber: projectNumber
+        });
+      }
     } catch (err) {
       console.error('Project lookup error:', err.message);
       res.status(err.response?.status || 500).json({
         error: 'Failed to get project',
-        details: err.message
+        details: err.message,
+        projectNumber: req.params.projectNumber
       });
     }
   });
